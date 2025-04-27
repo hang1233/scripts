@@ -1,184 +1,68 @@
 #!/bin/bash
 
-# 内网主机在线状态检测脚本
-# 用于测试指定网段内的主机是否在线
+# 定义颜色变量
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # 无颜色
 
-# 显示脚本使用信息
-show_usage() {
-    echo "用法: $0 [选项]"
-    echo "选项:"
-    echo "  -h, --help        显示此帮助信息"
-    echo "  -s, --subnet      指定IP网段，格式为 x.x.x.x/24"
-    echo ""
-    echo "示例: $0 -s 192.168.1.0/24"
+# 显示脚本使用帮助
+show_help() {
+  echo -e "${YELLOW}内网主机扫描工具${NC}"
+  echo -e "用法: $0 [网段]"
+  echo -e "示例: $0 192.168.1"
+  echo -e "      $0 10.0.0"
+  echo -e "格式: 前三段IP地址，如192.168.1"
+  echo -e "注意: 将扫描指定网段的1-254主机"
 }
 
-# 验证IP地址格式
-validate_ip() {
-    local ip=$1
-    local stat=1
+# 检查参数
+if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+  show_help
+  exit 0
+fi
 
-    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        OIFS=$IFS
-        IFS='.'
-        ip=($ip)
-        IFS=$OIFS
-        [[ ${ip[0]} -le 255 && ${ip[1]} -le 255 && ${ip[2]} -le 255 && ${ip[3]} -le 255 ]]
-        stat=$?
-    fi
-    return $stat
-}
+# 验证IP格式
+IP_REGEX='^([0-9]{1,3}\.){2}[0-9]{1,3}$'
+if ! [[ $1 =~ $IP_REGEX ]]; then
+  echo -e "${RED}错误: 无效的IP网段格式${NC}"
+  echo -e "请使用格式: 192.168.1"
+  exit 1
+fi
 
-# 验证CIDR格式
-validate_cidr() {
-    local cidr=$1
-    local ip=$(echo $cidr | cut -d'/' -f1)
-    local mask=$(echo $cidr | cut -d'/' -f2)
+network=$1
+# 创建临时文件用于记录在线主机
+temp_file=$(mktemp)
 
-    if ! validate_ip $ip; then
-        return 1
-    fi
+echo -e "${YELLOW}开始扫描网段 ${network}.1 至 ${network}.254...${NC}"
+echo -e "${YELLOW}实时显示在线主机:${NC}"
+echo "----------------------------------------"
 
-    if [[ ! $mask =~ ^[0-9]{1,2}$ ]]; then
-        return 1
-    fi
+# 使用并行处理提高扫描速度
+for i in {1..254}; do
+  # 使用ping命令检测主机是否在线，超时设置为1秒，只发送1个数据包
+  (ping -c 1 -W 1 ${network}.$i > /dev/null 2>&1 && 
+   echo -e "${GREEN}[在线]${NC} ${network}.$i" && 
+   echo "${network}.$i" >> "$temp_file") &
+  
+  # 限制并行进程数量，避免系统负载过高
+  if [[ $(jobs -r | wc -l) -ge 20 ]]; then
+    wait -n
+  fi
+done
 
-    if [[ $mask -lt 0 || $mask -gt 32 ]]; then
-        return 1
-    fi
+# 等待所有后台进程完成
+wait
 
-    return 0
-}
+# 统计在线主机数
+online_hosts=$(wc -l < "$temp_file")
+total_hosts=254
 
-# 从CIDR获取IP范围
-get_ip_range() {
-    local cidr=$1
-    local ip=$(echo $cidr | cut -d'/' -f1)
-    local mask=$(echo $cidr | cut -d'/' -f2)
-    
-    # 计算网络地址和可用IP范围
-    IFS='.' read -r i1 i2 i3 i4 <<< "$ip"
-    local ip_num=$(( (i1 << 24) + (i2 << 16) + (i3 << 8) + i4 ))
-    local netmask=$(( 0xFFFFFFFF << (32 - mask) ))
-    local network=$(( ip_num & netmask ))
-    local broadcast=$(( network | (~netmask & 0xFFFFFFFF) ))
-    
-    # 转换为IP地址
-    local net_i1=$(( (network >> 24) & 0xFF ))
-    local net_i2=$(( (network >> 16) & 0xFF ))
-    local net_i3=$(( (network >> 8) & 0xFF ))
-    local net_i4=$(( network & 0xFF ))
-    
-    local bcast_i1=$(( (broadcast >> 24) & 0xFF ))
-    local bcast_i2=$(( (broadcast >> 16) & 0xFF ))
-    local bcast_i3=$(( (broadcast >> 8) & 0xFF ))
-    local bcast_i4=$(( broadcast & 0xFF ))
-    
-    # 返回网络地址和广播地址
-    echo "$net_i1.$net_i2.$net_i3.$net_i4"
-    echo "$bcast_i1.$bcast_i2.$bcast_i3.$bcast_i4"
-}
+echo "----------------------------------------"
+echo -e "${YELLOW}扫描完成!${NC}"
+echo -e "网段: ${network}.0/24"
+echo -e "在线主机数: ${GREEN}${online_hosts}${NC}"
+echo -e "总扫描主机数: ${total_hosts}"
 
-# 检查主机是否在线
-check_host() {
-    local ip=$1
-    ping -c 1 -W 1 $ip > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        echo -e "\e[32m[在线]\e[0m $ip"
-        # 尝试获取主机名
-        hostname=$(nslookup $ip 2>/dev/null | grep "name =" | awk '{print $4}' | tr -d '.')
-        if [ -n "$hostname" ]; then
-            echo -e "      主机名: $hostname"
-        fi
-    else
-        echo -e "\e[31m[离线]\e[0m $ip" > /dev/null
-    fi
-}
-
-# 主函数
-main() {
-    # 检查是否有root权限
-    if [ "$(id -u)" -ne 0 ]; then
-        echo "此脚本需要root权限才能运行。请使用sudo执行。"
-        exit 1
-    fi
-
-    # 默认选项
-    subnet=""
-
-    # 解析命令行参数
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            -h|--help)
-                show_usage
-                exit 0
-                ;;
-            -s|--subnet)
-                subnet=$2
-                shift 2
-                ;;
-            *)
-                echo "未知选项: $1"
-                show_usage
-                exit 1
-                ;;
-        esac
-    done
-
-    # 如果没有指定网段，提示用户输入
-    if [ -z "$subnet" ]; then
-        echo "请输入要扫描的IP网段 (格式为 x.x.x.x/24):"
-        read subnet
-    fi
-
-    # 验证CIDR格式
-    if ! validate_cidr $subnet; then
-        echo "错误: 无效的IP网段格式。请使用 x.x.x.x/24 格式。"
-        exit 1
-    fi
-
-    echo "开始扫描网段 $subnet ..."
-    echo "这可能需要一些时间，请耐心等待..."
-    echo ""
-
-    # 获取网络地址和广播地址
-    read network
-    read broadcast
-    get_ip_range $subnet
-
-    # 提取网络部分
-    net_part=$(echo $network | cut -d'.' -f1-3)
-    
-    # 创建临时文件存储结果
-    temp_file=$(mktemp)
-    
-    # 并行检查所有IP
-    for i in $(seq 1 254); do
-        ip="$net_part.$i"
-        # 跳过网络地址和广播地址
-        if [ "$ip" = "$network" ] || [ "$ip" = "$broadcast" ]; then
-            continue
-        fi
-        check_host $ip &
-        # 限制并发数
-        if [ $(jobs | wc -l) -ge 50 ]; then
-            wait -n
-        fi
-    done
-    
-    # 等待所有后台任务完成
-    wait
-    
-    echo ""
-    echo "扫描完成！"
-    echo "在线主机列表:"
-    echo "----------------------------"
-    grep "\[在线\]" $temp_file | sort -t . -k 1,1n -k 2,2n -k 3,3n -k 4,4n
-    echo "----------------------------"
-    
-    # 清理临时文件
-    rm -f $temp_file
-}
-
-# 执行主函数
-main "$@"    
+# 清理临时文件
+rm -f "$temp_file" 
